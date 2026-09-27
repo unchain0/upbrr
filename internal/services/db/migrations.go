@@ -230,6 +230,25 @@ var migrationRegistry = []migrationStep{
 		dependsOn: []string{"2026_09_add_active_input", "2026_07_add_release_workflow_states"},
 		apply:     migrateRetainInputWorkflow,
 	},
+	{
+		id:        "2026_09_add_prepared_release_full_evidence",
+		dependsOn: []string{"2026_07_add_canonical_release_generations"},
+		apply:     migrateAddPreparedReleaseFullEvidence,
+	},
+}
+
+func migrateAddPreparedReleaseFullEvidence(ctx context.Context, exec migrationExecutor) error {
+	exists, err := tableColumnExists(ctx, exec, "prepared_release_current", "full_evidence_json")
+	if err != nil {
+		return fmt.Errorf("db: inspect prepared release full evidence: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := exec.ExecContext(ctx, `ALTER TABLE prepared_release_current ADD COLUMN full_evidence_json TEXT`); err != nil {
+		return fmt.Errorf("db: add prepared release full evidence: %w", err)
+	}
+	return nil
 }
 
 func migrateRetainInputWorkflow(ctx context.Context, exec migrationExecutor) error {

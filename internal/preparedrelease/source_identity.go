@@ -72,7 +72,97 @@ func VerifyInputSourceWithProgress(
 		return api.VerifiedInputSource{}, err
 	}
 	identity.ManifestFingerprint = fingerprint
-	return api.VerifiedInputSource{Manifest: manifest, Identity: identity}, nil
+	full, err := captureFullSourceEvidence(ctx, manifest)
+	if err != nil {
+		return api.VerifiedInputSource{}, err
+	}
+	return api.VerifiedInputSource{
+		Manifest:     manifest,
+		Identity:     identity,
+		FullEvidence: full,
+	}, nil
+}
+
+func captureFullSourceEvidence(ctx context.Context, manifest api.SourceManifest) ([]api.FullSourceFile, error) {
+	files, _, _, err := sourceIdentityManifest(manifest)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("%w: no source files for full evidence", ErrSourceChanged)
+	}
+	full := make([]api.FullSourceFile, 0, len(files))
+	for _, file := range files {
+		digest, read, err := hashSourceFileSample(ctx, file.localPath, file.size, 0, 0, nil)
+		if err != nil {
+			return nil, fmt.Errorf("%w: full source hash: %w", ErrSourceChanged, err)
+		}
+		if read != file.size {
+			return nil, fmt.Errorf("%w: source size changed while hashing %q", ErrSourceChanged, file.localPath)
+		}
+		full = append(full, api.FullSourceFile{
+			LocalPath: file.localPath,
+			Size:      file.size,
+			SHA256:    digest,
+		})
+	}
+	if err := VerifySourceManifestStability(ctx, manifest); err != nil {
+		return nil, err
+	}
+	return full, nil
+}
+
+// ActiveInputSourceVersion binds a sampled identity to ordered full-file evidence.
+// It is private slot authority, not a replacement for sample-v2 identities.
+func ActiveInputSourceVersion(verified api.VerifiedInputSource) (string, error) {
+	if verified.Identity.Version != api.SourceContentIdentityVersion || !validIdentityDigest(verified.Identity.Digest) ||
+		len(verified.FullEvidence) == 0 || len(verified.FullEvidence) != len(verified.Identity.Files) {
+		return "", fmt.Errorf("%w: missing active input full evidence", ErrSourceChanged)
+	}
+	for index, file := range verified.FullEvidence {
+		sample := verified.Identity.Files[index]
+		if !pathutil.SamePath(file.LocalPath, sample.LocalPath) || file.Size != sample.Size ||
+			file.Size < 0 || !validIdentityDigest(file.SHA256) {
+			return "", fmt.Errorf("%w: invalid active input full evidence", ErrSourceChanged)
+		}
+	}
+	payload, err := json.Marshal(struct {
+		Sample string               `json:"sample"`
+		Files  []api.FullSourceFile `json:"files"`
+	}{verified.Identity.Digest, verified.FullEvidence})
+	if err != nil {
+		return "", fmt.Errorf("marshal active input source version: %w", err)
+	}
+	digest := sha256.Sum256(append([]byte("active-input-full-v1\x00"), payload...))
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// VerifyFullSourceEvidence compares every manifest file against independent full-byte evidence.
+func VerifyFullSourceEvidence(ctx context.Context, manifest api.SourceManifest, full []api.FullSourceFile) error {
+	if err := VerifySourceManifestStability(ctx, manifest); err != nil {
+		return err
+	}
+	files, _, _, err := sourceIdentityManifest(manifest)
+	if err != nil {
+		return fmt.Errorf("%w: inspect full source inventory: %w", ErrSourceChanged, err)
+	}
+	if len(files) == 0 || len(full) != len(files) {
+		return fmt.Errorf("%w: missing full source evidence", ErrSourceChanged)
+	}
+	for index, file := range files {
+		evidence := full[index]
+		if !pathutil.SamePath(evidence.LocalPath, file.localPath) || evidence.Size != file.size || !validIdentityDigest(evidence.SHA256) {
+			return fmt.Errorf("%w: invalid full source evidence for %q", ErrSourceChanged, file.localPath)
+		}
+		digest, read, err := hashSourceFileSample(ctx, file.localPath, file.size, 0, 0, nil)
+		if err != nil {
+			return fmt.Errorf("%w: verify full source file: %w", ErrSourceChanged, err)
+		}
+		if read != file.size || digest != evidence.SHA256 {
+			return fmt.Errorf("%w: full source file differs: %q", ErrSourceChanged, file.localPath)
+		}
+	}
+	return VerifySourceManifestStability(ctx, manifest)
 }
 
 // VerifySourceContentIdentity samples at most SourceContentIdentitySampleBytes

@@ -553,6 +553,7 @@ func TestWorkflowUploadPlanDerivesSubmissionContentIdentityForActiveInput(t *tes
 			SourcePath:     source,
 			SourceIdentity: verified,
 			SourceManifest: inspection.Manifest,
+			FullEvidence:   inspection.FullEvidence,
 		}},
 		trackers: retained,
 		torrents: &workflowTorrentServiceCapture{},

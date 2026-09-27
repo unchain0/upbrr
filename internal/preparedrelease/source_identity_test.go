@@ -180,6 +180,218 @@ func TestPrepareAttachesVerifiedSourceIdentity(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsChangedTailWithSameStat(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "release.mkv")
+	prefix := bytes.Repeat([]byte("a"), int(api.SourceContentIdentitySampleBytes))
+	writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("first")...))
+	modified := time.Date(2026, time.September, 19, 1, 2, 3, 0, time.UTC)
+	if err := os.Chtimes(source, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyInputSource(t.Context(), api.PrepareInput{SourcePath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("other")...))
+	if err := os.Chtimes(source, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	module := newTestModule(t, newMemoryStore(), &recordingCollector{})
+	_, err = module.Prepare(t.Context(), api.PrepareInput{SourcePath: source, VerifiedSource: &verified})
+	if !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("prepare after changed tail = %v, want source changed", err)
+	}
+}
+
+func TestPrepareRejectsMissingFullSourceEvidence(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "release.mkv")
+	writeSourceIdentityFile(t, source, "content")
+	verified, err := VerifyInputSource(t.Context(), api.PrepareInput{SourcePath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified.FullEvidence = nil
+	module := newTestModule(t, newMemoryStore(), &recordingCollector{})
+	_, err = module.Prepare(t.Context(), api.PrepareInput{SourcePath: source, VerifiedSource: &verified})
+	if !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("missing full evidence = %v, want source changed", err)
+	}
+}
+
+func TestPrepareResolvedActiveAuthorityRequiresVerifiedSource(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "release.mkv")
+	writeSourceIdentityFile(t, source, "content")
+	module := newTestModule(t, newMemoryStore(), &recordingCollector{})
+	ctx := api.WithActiveInputAuthority(t.Context(), api.ActiveInputAuthority{CoordinatorID: "coordinator", Fence: 1})
+	resolved, err := module.ResolveInput(ctx, api.PrepareInput{SourcePath: source}, api.ReleaseCorrectionUpdate{Mode: api.ReleaseCorrectionUpdateInherit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := module.PrepareResolved(ctx, resolved); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("active preparation without verified source = %v, want source changed", err)
+	}
+}
+
+func TestPrepareChangedTailRecollectsInsteadOfReusingSample(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(map[bool]string{false: "published", true: "persisted_without_evidence"}[restart], func(t *testing.T) {
+			ctx := t.Context()
+			source := filepath.Join(t.TempDir(), "release.mkv")
+			prefix := bytes.Repeat([]byte("a"), int(api.SourceContentIdentitySampleBytes))
+			writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("first")...))
+			modified := time.Date(2026, time.September, 19, 1, 2, 3, 0, time.UTC)
+			if err := os.Chtimes(source, modified, modified); err != nil {
+				t.Fatal(err)
+			}
+			first, err := VerifyInputSource(ctx, api.PrepareInput{SourcePath: source})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := newMemoryStore()
+			collector := &recordingCollector{}
+			module := newTestModule(t, store, collector)
+			prepared, err := module.Prepare(ctx, api.PrepareInput{SourcePath: source, VerifiedSource: &first})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restart {
+				payload, err := json.Marshal(prepared.Release)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var persisted api.PreparedRelease
+				if err := json.Unmarshal(payload, &persisted); err != nil {
+					t.Fatal(err)
+				}
+				if len(persisted.FullEvidence) != 0 {
+					t.Fatal("public row retained private evidence")
+				}
+				store.current[canonicalSourceKey(source)] = persisted
+				module = newTestModule(t, store, collector)
+			}
+			writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("other")...))
+			if err := os.Chtimes(source, modified, modified); err != nil {
+				t.Fatal(err)
+			}
+			second, err := VerifyInputSource(ctx, api.PrepareInput{SourcePath: source})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.Identity.Digest != second.Identity.Digest || first.FullEvidence[0].SHA256 == second.FullEvidence[0].SHA256 {
+				t.Fatal("test source did not preserve sample while changing full bytes")
+			}
+			collector.facts = &CollectedFacts{Media: api.MediaFacts{Container: "refreshed"}}
+			refreshed, err := module.Prepare(ctx, api.PrepareInput{SourcePath: source, VerifiedSource: &second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if refreshed.Release.Generation != prepared.Release.Generation+1 || collector.callCount() != 2 || refreshed.Release.Media.Container != "refreshed" {
+				t.Fatalf("stale facts reused: generation %d -> %d, collects %d, media %q", prepared.Release.Generation, refreshed.Release.Generation, collector.callCount(), refreshed.Release.Media.Container)
+			}
+			subject, err := module.ResolveUploadSubject(ctx, api.UploadSubjectInput{Release: api.ReleaseRef{SourcePath: source, Generation: refreshed.Release.Generation}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(subject.FullEvidence) != 1 || subject.FullEvidence[0] != second.FullEvidence[0] {
+				t.Fatalf("published evidence = %#v, want %#v", subject.FullEvidence, second.FullEvidence)
+			}
+		})
+	}
+}
+
+func TestDirectPrepareChangedTailRecollectsFacts(t *testing.T) {
+	ctx := t.Context()
+	source := filepath.Join(t.TempDir(), "release.mkv")
+	prefix := bytes.Repeat([]byte("a"), int(api.SourceContentIdentitySampleBytes))
+	writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("first")...))
+	modified := time.Date(2026, time.September, 19, 1, 2, 3, 0, time.UTC)
+	if err := os.Chtimes(source, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	collector := &recordingCollector{}
+	module := newTestModule(t, newMemoryStore(), collector)
+	first, err := module.Prepare(ctx, api.PrepareInput{SourcePath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("other")...))
+	if err := os.Chtimes(source, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	collector.facts = &CollectedFacts{Media: api.MediaFacts{Container: "refreshed"}}
+	second, err := module.Prepare(ctx, api.PrepareInput{SourcePath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Release.Generation+1 != second.Release.Generation || collector.callCount() != 2 ||
+		second.Release.Media.Container != "refreshed" || len(second.Release.FullEvidence) != 1 {
+		t.Fatalf("direct preparation reused stale facts: generation %d -> %d, collects %d, media %q, evidence %d", first.Release.Generation, second.Release.Generation, collector.callCount(), second.Release.Media.Container, len(second.Release.FullEvidence))
+	}
+}
+
+func TestPrepareChangedTailDoesNotRetainClientEvidence(t *testing.T) {
+	ctx := t.Context()
+	source := filepath.Join(t.TempDir(), "release.mkv")
+	prefix := bytes.Repeat([]byte("a"), int(api.SourceContentIdentitySampleBytes))
+	writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("first")...))
+	modified := time.Date(2026, time.September, 19, 1, 2, 3, 0, time.UTC)
+	if err := os.Chtimes(source, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	first, err := VerifyInputSource(ctx, api.PrepareInput{SourcePath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := newClientEvidenceTestCollector(clientEvidenceTestSnapshot("client-hash"))
+	module := newTestModule(t, newMemoryStore(), collector)
+	if _, err := module.Prepare(ctx, api.PrepareInput{SourcePath: source, VerifiedSource: &first}); err != nil {
+		t.Fatal(err)
+	}
+	writeSourceIdentityBytes(t, source, append(append([]byte(nil), prefix...), []byte("other")...))
+	if err := os.Chtimes(source, modified, modified); err != nil {
+		t.Fatal(err)
+	}
+	second, err := VerifyInputSource(ctx, api.PrepareInput{SourcePath: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Identity.Digest != second.Identity.Digest || first.FullEvidence[0].SHA256 == second.FullEvidence[0].SHA256 {
+		t.Fatal("test source did not preserve sample while changing full bytes")
+	}
+	if _, err := module.Prepare(ctx, api.PrepareInput{SourcePath: source, VerifiedSource: &second}); err != nil {
+		t.Fatal(err)
+	}
+	if len(collector.retained) != 2 || collector.retained[0] || collector.retained[1] {
+		t.Fatalf("client evidence retained across source change: %v", collector.retained)
+	}
+}
+
+func TestPrepareRejectsChangedNonPrimaryVideoWithSameStat(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first.mkv")
+	second := filepath.Join(root, "second.mkv")
+	prefix := bytes.Repeat([]byte("a"), int(api.SourceContentIdentitySampleBytes))
+	writeSourceIdentityBytes(t, first, []byte("primary"))
+	writeSourceIdentityBytes(t, second, append(append([]byte(nil), prefix...), []byte("first")...))
+	verified, err := VerifyInputSource(t.Context(), api.PrepareInput{SourcePath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSourceIdentityBytes(t, second, append(append([]byte(nil), prefix...), []byte("other")...))
+	if err := os.Chtimes(second, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	module := newTestModule(t, newMemoryStore(), &recordingCollector{})
+	_, err = module.Prepare(t.Context(), api.PrepareInput{SourcePath: root, VerifiedSource: &verified})
+	if !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("changed non-primary video = %v, want source changed", err)
+	}
+}
+
 func TestResolveUploadSubjectRetainsVerifiedSourceIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -243,7 +455,7 @@ func TestPrepareRejectsLegacyCompleteSourceIdentity(t *testing.T) {
 	}
 }
 
-func TestRestartHydrationRestoresPrivateVerifiedIdentity(t *testing.T) {
+func TestRestartWithoutFullEvidenceRecollectsVerifiedSource(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	source := filepath.Join(t.TempDir(), "release.mkv")
@@ -274,24 +486,28 @@ func TestRestartHydrationRestoresPrivateVerifiedIdentity(t *testing.T) {
 	store.current[canonicalSourceKey(source)] = persisted
 	collector := newClientEvidenceTestCollector(clientEvidenceTestSnapshot("hydrated-hash"))
 	restarted := newTestModule(t, store, collector)
-	reused, err := restarted.Prepare(ctx, api.PrepareInput{
+	if _, err := restarted.Prepare(ctx, api.PrepareInput{
 		SourcePath:      source,
 		VerifiedSource:  &verified,
 		RequirePrepared: true,
-	})
+	}); err == nil || !strings.Contains(err.Error(), "compatible prepared generation is required") {
+		t.Fatalf("reuse without persisted evidence = %v, want incompatible generation", err)
+	}
+	refreshed, err := restarted.Prepare(ctx, api.PrepareInput{SourcePath: source, VerifiedSource: &verified})
 	if err != nil {
 		t.Fatal(err)
 	}
 	upload, err := restarted.ResolveUploadSubject(ctx, api.UploadSubjectInput{
-		Release: api.ReleaseRef{SourcePath: source, Generation: reused.Release.Generation},
+		Release: api.ReleaseRef{SourcePath: source, Generation: refreshed.Release.Generation},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reused.Release.Generation != prepared.Release.Generation || upload.SourceIdentity.Digest != verified.Identity.Digest ||
+	if refreshed.Release.Generation != prepared.Release.Generation+1 || upload.SourceIdentity.Digest != verified.Identity.Digest ||
 		len(upload.SourceIdentity.Files) != 1 || upload.SourceManifest.SourcePath != source ||
-		collector.collectCount() != 0 || collector.hydrateCount() != 1 {
-		t.Fatal("restart did not restore the same verified generation without collection")
+		len(upload.FullEvidence) != 1 || upload.FullEvidence[0] != verified.FullEvidence[0] ||
+		collector.collectCount() != 1 || collector.hydrateCount() != 0 {
+		t.Fatal("restart did not recollect the verified generation")
 	}
 }
 

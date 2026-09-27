@@ -601,6 +601,11 @@ func verifyWorkflowInput(ctx context.Context, input api.PrepareInput) (api.Input
 		finish(err)
 		return api.InputRecord{}, fmt.Errorf("core: verify workflow input: %w", err)
 	}
+	version, err := preparedrelease.ActiveInputSourceVersion(verified)
+	if err != nil {
+		finish(err)
+		return api.InputRecord{}, fmt.Errorf("core: version workflow input: %w", err)
+	}
 	payload, err := json.Marshal(verified)
 	if err != nil {
 		err = fmt.Errorf("core: marshal verified source input: %w", err)
@@ -609,7 +614,7 @@ func verifyWorkflowInput(ctx context.Context, input api.PrepareInput) (api.Input
 	}
 	result := api.InputRecord{
 		CanonicalPath: preparedrelease.CanonicalSourceKey(verified.Manifest.SourcePath),
-		SourceVersion: verified.Identity.Digest,
+		SourceVersion: version,
 		Manifest:      payload,
 	}
 	finish(nil)

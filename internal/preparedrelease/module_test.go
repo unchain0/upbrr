@@ -712,6 +712,12 @@ func TestPrepareDoesNotCacheImplicitBDMVPlaylistSelection(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(sourcePath, "BDMV", "STREAM"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "BDMV", "PLAYLIST", "00001.MPLS"), []byte("playlist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourcePath, "BDMV", "STREAM", "00001.M2TS"), []byte("stream"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	collector := &recordingCollector{}
 	module := newTestModule(t, newMemoryStore(), collector)
 	input := api.PrepareInput{SourcePath: sourcePath}

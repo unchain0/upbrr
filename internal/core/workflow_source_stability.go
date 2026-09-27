@@ -14,13 +14,14 @@ import (
 // workflowSourceEffectReporter checks the captured source immediately before
 // each tracker admission, including plans held while the user reviews them.
 type workflowSourceEffectReporter struct {
-	reporter api.WorkflowExternalEffectReporter
-	manifest api.SourceManifest
+	reporter     api.WorkflowExternalEffectReporter
+	manifest     api.SourceManifest
+	fullEvidence []api.FullSourceFile
 }
 
 func (r workflowSourceEffectReporter) Begin(ctx context.Context, effect api.WorkflowExternalEffect) (api.WorkflowExternalEffectReceipt, error) {
 	if effect.Kind == api.WorkflowExternalEffectTrackerSubmission {
-		if err := preparedrelease.VerifySourceManifestStability(ctx, r.manifest); err != nil {
+		if err := preparedrelease.VerifyFullSourceEvidence(ctx, r.manifest, r.fullEvidence); err != nil {
 			return api.WorkflowExternalEffectReceipt{}, fmt.Errorf("workflow submission source stability: %w", err)
 		}
 	}

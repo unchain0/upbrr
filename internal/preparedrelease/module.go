@@ -25,7 +25,7 @@ import (
 
 // ContractVersion changes whenever prepared fact semantics or the private seed
 // contract become incompatible, forcing persisted generations to be recomputed.
-const ContractVersion = "prepared-release-v18"
+const ContractVersion = "prepared-release-v19"
 
 // Store is the prepared-release persistence port. Implementations must commit
 // facts, identity, and provider metadata as one generation transaction.
@@ -156,6 +156,16 @@ func (m *Module) PrepareResolved(ctx context.Context, resolved api.ResolvedPrepa
 		return api.PrepareResult{}, err
 	}
 	input = normalized.input
+	if _, active := api.ActiveInputAuthorityFromContext(ctx); active && input.VerifiedSource == nil {
+		return api.PrepareResult{}, fmt.Errorf("%w: active preparation requires verified source evidence", ErrSourceChanged)
+	}
+	if input.VerifiedSource == nil {
+		verified, err := VerifyInputSource(ctx, input)
+		if err != nil {
+			return api.PrepareResult{}, err
+		}
+		input.VerifiedSource = &verified
+	}
 
 	releaseGate, err := m.gates.acquire(ctx, normalized.sourceKey)
 	if err != nil {
@@ -193,6 +203,11 @@ func (m *Module) PrepareResolved(ctx context.Context, resolved api.ResolvedPrepa
 			api.NewPreparationProgressUpdate(api.PreparationPhaseSourceInspection, api.PreparationProgressFailed, "Source changed during verification."),
 		)
 		return api.PrepareResult{}, err
+	}
+	if input.VerifiedSource != nil {
+		if err := VerifyFullSourceEvidence(ctx, manifest, input.VerifiedSource.FullEvidence); err != nil {
+			return api.PrepareResult{}, err
+		}
 	}
 	if sourceFingerprint != resolved.SourceFingerprint {
 		return api.PrepareResult{}, fmt.Errorf("prepared release: source changed after input resolution: %w", api.ErrCorrectionConflict)
@@ -236,11 +251,13 @@ func (m *Module) PrepareResolved(ctx context.Context, resolved api.ResolvedPrepa
 	reuseAllowed := layout.DiscType != "BDMV" || input.Instructions.Playlist.Set
 	forceClientRefresh := input.Controls.ForceRecheck != nil && *input.Controls.ForceRecheck
 	if hasCurrent && reuseAllowed && !input.Force && !input.ExternalFreshness.RequiresRefresh() && !forceClientRefresh &&
-		current.Compatibility == compatibility {
+		current.Compatibility == compatibility &&
+		(input.VerifiedSource == nil || len(current.FullEvidence) != 0 && reflect.DeepEqual(current.FullEvidence, input.VerifiedSource.FullEvidence)) {
 		// Public prepared rows omit private byte-verification evidence. Restore
 		// it only from the current active input's validated private manifest.
 		if verifiedSource.Version != "" {
 			current.SourceIdentity = verifiedSource
+			current.FullEvidence = append([]api.FullSourceFile(nil), input.VerifiedSource.FullEvidence...)
 		}
 		if err := validateGeneration(current); err != nil {
 			api.EmitPreparationProgress(
@@ -363,16 +380,21 @@ func (m *Module) PrepareResolved(ctx context.Context, resolved api.ResolvedPrepa
 		return api.PrepareResult{}, err
 	}
 	if input.VerifiedSource != nil {
-		if err := VerifySourceManifestStability(ctx, manifest); err != nil {
+		if err := VerifyFullSourceEvidence(ctx, manifest, input.VerifiedSource.FullEvidence); err != nil {
 			return api.PrepareResult{}, err
 		}
 	}
 	preparedAt := m.now().UTC()
+	var fullEvidence []api.FullSourceFile
+	if input.VerifiedSource != nil {
+		fullEvidence = append(fullEvidence, input.VerifiedSource.FullEvidence...)
+	}
 	release := api.PreparedRelease{
 		Generation:       generation,
 		Compatibility:    compatibility,
 		Source:           manifest,
 		SourceIdentity:   verifiedSource,
+		FullEvidence:     fullEvidence,
 		Naming:           collected.Naming,
 		Episode:          collected.Episode,
 		Media:            collected.Media,
@@ -619,7 +641,9 @@ func (m *Module) retainedClientEvidence(
 	current, ok := m.envelopes[canonicalSourceKey(input.SourcePath)]
 	if !ok || current.result.Release.Generation != generation || current.resources.policy != input.Policy ||
 		current.result.Release.Compatibility.SourceFingerprint != compatibility.SourceFingerprint ||
-		current.result.Release.Compatibility.FactInstructionFingerprint != compatibility.FactInstructionFingerprint {
+		current.result.Release.Compatibility.FactInstructionFingerprint != compatibility.FactInstructionFingerprint ||
+		input.VerifiedSource != nil && (len(current.result.Release.FullEvidence) == 0 ||
+			!reflect.DeepEqual(current.result.Release.FullEvidence, input.VerifiedSource.FullEvidence)) {
 		return nil
 	}
 	evidence := current.resources.clientEvidence

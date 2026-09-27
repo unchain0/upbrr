@@ -5,13 +5,91 @@ package releaseworkflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/autobrr/upbrr/internal/preparedrelease"
 	"github.com/autobrr/upbrr/internal/services/db"
 	"github.com/autobrr/upbrr/pkg/api"
 )
+
+func TestAttachVerifiedInputRejectsLegacyAndMissingFullEvidence(t *testing.T) {
+	for _, variant := range []string{"valid", "legacy-version", "missing-evidence"} {
+		t.Run(variant, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.mkv")
+			if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			repo, err := db.Open(filepath.Join(t.TempDir(), "input.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = repo.Close() })
+			if err := repo.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			persistent, err := NewPersistentRepository(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module, err := New(persistent, NewMemoryPrivateResourceStore(), ReleasePreparerFunc{}, WithActiveInputs(repo,
+				func(ctx context.Context, input api.PrepareInput) (api.InputRecord, error) {
+					verified, err := preparedrelease.VerifyInputSource(ctx, input)
+					if err != nil {
+						return api.InputRecord{}, fmt.Errorf("verify fixture input: %w", err)
+					}
+					version, err := preparedrelease.ActiveInputSourceVersion(verified)
+					if err != nil {
+						return api.InputRecord{}, fmt.Errorf("version fixture input: %w", err)
+					}
+					if variant == "legacy-version" {
+						version = verified.Identity.Digest
+					}
+					if variant == "missing-evidence" {
+						verified.FullEvidence = nil
+					}
+					payload, err := json.Marshal(verified)
+					if err != nil {
+						return api.InputRecord{}, fmt.Errorf("marshal fixture input: %w", err)
+					}
+					return api.InputRecord{
+						CanonicalPath: input.SourcePath,
+						SourceVersion: version,
+						Manifest:      payload,
+					}, nil
+				}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if module.activeCancel != nil {
+					module.activeCancel()
+					<-module.activeDone
+				}
+			})
+			opened, err := module.OpenInput(t.Context(), testOwnerID, OpenInputRequest{
+				Input: api.PrepareInput{SourcePath: path}, IdempotencyKey: "open",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := api.PrepareInput{SourcePath: path}
+			err = module.attachVerifiedInput(t.Context(), testOwnerID, opened.WorkflowID, &input)
+			if variant == "valid" {
+				if err != nil || input.VerifiedSource == nil {
+					t.Fatalf("valid attach: %v, source = %#v", err, input.VerifiedSource)
+				}
+			} else if !errors.Is(err, api.ErrActiveInputChanged) || input.VerifiedSource != nil {
+				t.Fatalf("%s attach: %v, source = %#v", variant, err, input.VerifiedSource)
+			}
+		})
+	}
+}
 
 func TestActiveInputOpenRefreshRollbackAndOwnerIsolation(t *testing.T) {
 	t.Parallel()
@@ -132,10 +210,29 @@ func TestReopenVerifiedInputRestoresAudioAnalysis(t *testing.T) {
 	module, err := New(persistent, NewMemoryPrivateResourceStore(), preparer,
 		WithAudioAnalysisBuilder(&audioAnalysisBuilderFake{resource: resource}),
 		WithActiveInputs(repo, func(_ context.Context, input api.PrepareInput) (api.InputRecord, error) {
+			verified := api.VerifiedInputSource{
+				Identity: api.SourceContentIdentity{
+					Version: api.SourceContentIdentityVersion,
+					Digest:  strings.Repeat("a", 64),
+					Files:   []api.VerifiedSourceFile{{LocalPath: input.SourcePath}},
+				},
+				FullEvidence: []api.FullSourceFile{{LocalPath: input.SourcePath, SHA256: strings.Repeat("a", 64)}},
+			}
+			if version != "verified-a" {
+				verified.FullEvidence[0].SHA256 = strings.Repeat("b", 64)
+			}
+			value, err := preparedrelease.ActiveInputSourceVersion(verified)
+			if err != nil {
+				return api.InputRecord{}, fmt.Errorf("version fixture input: %w", err)
+			}
+			payload, err := json.Marshal(verified)
+			if err != nil {
+				return api.InputRecord{}, fmt.Errorf("marshal fixture input: %w", err)
+			}
 			return api.InputRecord{
 				CanonicalPath: input.SourcePath,
-				SourceVersion: version,
-				Manifest:      []byte(`{"Identity":{"Digest":"` + version + `"}}`),
+				SourceVersion: value,
+				Manifest:      payload,
 			}, nil
 		}))
 	if err != nil {
@@ -459,11 +556,23 @@ func TestClosedInputWorkflowSourceAssociatesTerminalHistoryPurge(t *testing.T) {
 				test.configure(&preparer)
 			}
 			module, err := New(persistent, NewMemoryPrivateResourceStore(), preparer, WithActiveInputs(repo,
-				func(_ context.Context, input api.PrepareInput) (api.InputRecord, error) {
+				func(ctx context.Context, input api.PrepareInput) (api.InputRecord, error) {
+					verified, err := preparedrelease.VerifyInputSource(ctx, input)
+					if err != nil {
+						return api.InputRecord{}, fmt.Errorf("verify fixture input: %w", err)
+					}
+					version, err := preparedrelease.ActiveInputSourceVersion(verified)
+					if err != nil {
+						return api.InputRecord{}, fmt.Errorf("version fixture input: %w", err)
+					}
+					manifest, err := json.Marshal(verified)
+					if err != nil {
+						return api.InputRecord{}, fmt.Errorf("marshal fixture input: %w", err)
+					}
 					return api.InputRecord{
 						CanonicalPath: input.SourcePath,
-						SourceVersion: "verified",
-						Manifest:      []byte(`{"Identity":{"Digest":"verified"}}`),
+						SourceVersion: version,
+						Manifest:      manifest,
 					}, nil
 				}))
 			if err != nil {
@@ -480,6 +589,9 @@ func TestClosedInputWorkflowSourceAssociatesTerminalHistoryPurge(t *testing.T) {
 			})
 
 			sourcePath := filepath.Join(t.TempDir(), "source.mkv")
+			if err := os.WriteFile(sourcePath, []byte("synthetic media"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			input := api.PrepareInput{SourcePath: sourcePath}
 			active, err := module.OpenInput(t.Context(), testOwnerID, OpenInputRequest{Input: input, IdempotencyKey: "open-" + test.name})
 			if err != nil {

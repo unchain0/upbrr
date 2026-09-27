@@ -16,6 +16,30 @@ import (
 
 const expectedSchemaVersion = 8
 
+func TestMigratePreparedReleaseFullEvidencePreservesLegacyRows(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rawDB.Close() })
+	ctx := t.Context()
+	if _, err := rawDB.ExecContext(ctx, `CREATE TABLE prepared_release_current (source_path TEXT PRIMARY KEY, generation INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `INSERT INTO prepared_release_current VALUES ('old', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := migrateAddPreparedReleaseFullEvidence(ctx, rawDB); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var evidence *string
+	if err := rawDB.QueryRowContext(ctx, `SELECT full_evidence_json FROM prepared_release_current WHERE source_path = 'old'`).Scan(&evidence); err != nil || evidence != nil {
+		t.Fatalf("legacy row evidence = %v, err %v; want NULL", evidence, err)
+	}
+}
+
 func TestBaselineSchemaIncludesCurrentMigrationColumns(t *testing.T) {
 	t.Parallel()
 

@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -30,6 +31,41 @@ func TestPreparedReleaseCommitExactReadback(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded, release) {
 		t.Fatalf("loaded prepared release differs\ngot:  %#v\nwant: %#v", loaded, release)
+	}
+}
+
+func TestPreparedReleasePersistsPrivateFullEvidence(t *testing.T) {
+	repo := openPreparedReleaseTestRepo(t)
+	release := preparedReleaseDBFixture(filepath.Join(t.TempDir(), "release.mkv"), 1)
+	release.FullEvidence = []api.FullSourceFile{{
+		LocalPath: release.Source.SourcePath,
+		Size:      7,
+		SHA256:    strings.Repeat("a", 64),
+	}}
+	if err := repo.CommitPreparedRelease(t.Context(), release); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := repo.LoadPreparedRelease(t.Context(), release.Source.SourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded.FullEvidence, release.FullEvidence) {
+		t.Fatalf("private full evidence lost on readback: got %#v", loaded.FullEvidence)
+	}
+	payload, err := json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), `"FullEvidence":`) || strings.Contains(string(payload), release.FullEvidence[0].SHA256) {
+		t.Fatalf("private evidence exposed in public JSON: %s", payload)
+	}
+	release.FullEvidence = nil
+	if err := repo.CommitPreparedRelease(t.Context(), release); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = repo.LoadPreparedRelease(t.Context(), release.Source.SourcePath)
+	if err != nil || loaded.FullEvidence != nil {
+		t.Fatalf("replacement must clear private evidence: got %#v, err %v", loaded.FullEvidence, err)
 	}
 }
 

@@ -39,6 +39,7 @@ func (m *Module) ResolveUploadSubject(ctx context.Context, input api.UploadSubje
 	}
 	subject := api.UploadSubject{
 		SourceIdentity:              release.SourceIdentity,
+		FullEvidence:                release.FullEvidence,
 		EffectiveMetadata:           release.MetadataFacts(),
 		ManualLanguages:             release.Media.ManualLanguages(),
 		HardcodedSubs:               release.Media.HardcodedSubs,
@@ -141,6 +142,7 @@ func (m *Module) ResolveUploadSubject(ctx context.Context, input api.UploadSubje
 		Files:               append([]api.VerifiedSourceFile(nil), subject.SourceIdentity.Files...),
 	}
 	cloned.SourceManifest = release.Source
+	cloned.FullEvidence = append([]api.FullSourceFile(nil), subject.FullEvidence...)
 	return cloned, nil
 }
 

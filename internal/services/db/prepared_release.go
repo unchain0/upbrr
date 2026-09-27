@@ -143,15 +143,22 @@ func commitPreparedReleaseTx(ctx context.Context, tx *sql.Tx, release api.Prepar
 	if err != nil {
 		return fmt.Errorf("db commit prepared release: encode assessments: %w", err)
 	}
+	var fullEvidenceJSON any
+	if release.FullEvidence != nil {
+		fullEvidenceJSON, err = encodePreparedJSON(release.FullEvidence)
+		if err != nil {
+			return fmt.Errorf("db commit prepared release: encode full evidence: %w", err)
+		}
+	}
 
 	compatibility := release.Compatibility
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO prepared_release_current (
 			source_path, generation, source_fingerprint, fact_instruction_fingerprint,
 			policy_fingerprint, contract_version, source_json, naming_json,
-			episode_json, media_json, disc_json, assessments_json, prepared_at
+			episode_json, media_json, disc_json, assessments_json, prepared_at, full_evidence_json
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_path) DO UPDATE SET
 			generation = excluded.generation,
 			source_fingerprint = excluded.source_fingerprint,
@@ -164,7 +171,8 @@ func commitPreparedReleaseTx(ctx context.Context, tx *sql.Tx, release api.Prepar
 			media_json = excluded.media_json,
 			disc_json = excluded.disc_json,
 			assessments_json = excluded.assessments_json,
-			prepared_at = excluded.prepared_at
+			prepared_at = excluded.prepared_at,
+			full_evidence_json = excluded.full_evidence_json
 	`,
 		release.Source.SourcePath,
 		generation,
@@ -179,6 +187,7 @@ func commitPreparedReleaseTx(ctx context.Context, tx *sql.Tx, release api.Prepar
 		discJSON,
 		assessmentsJSON,
 		release.PreparedAt.UTC().Format(time.RFC3339Nano),
+		fullEvidenceJSON,
 	); err != nil {
 		return fmt.Errorf("db commit prepared release: facts: %w", err)
 	}
@@ -213,7 +222,7 @@ func (r *SQLiteRepository) LoadPreparedRelease(ctx context.Context, sourcePath s
 	row := tx.QueryRowContext(ctx, `
 		SELECT generation, source_fingerprint, fact_instruction_fingerprint,
 			policy_fingerprint, contract_version, source_json, naming_json,
-			episode_json, media_json, disc_json, assessments_json, prepared_at
+			episode_json, media_json, disc_json, assessments_json, prepared_at, full_evidence_json
 		FROM prepared_release_current
 		WHERE source_path = ?
 	`, sourcePath)
@@ -226,6 +235,7 @@ func (r *SQLiteRepository) LoadPreparedRelease(ctx context.Context, sourcePath s
 	var discJSON string
 	var assessmentsJSON string
 	var preparedAt string
+	var fullEvidenceJSON sql.NullString
 	if err := row.Scan(
 		&generation,
 		&release.Compatibility.SourceFingerprint,
@@ -239,6 +249,7 @@ func (r *SQLiteRepository) LoadPreparedRelease(ctx context.Context, sourcePath s
 		&discJSON,
 		&assessmentsJSON,
 		&preparedAt,
+		&fullEvidenceJSON,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return api.PreparedRelease{}, internalerrors.ErrNotFound
@@ -266,6 +277,11 @@ func (r *SQLiteRepository) LoadPreparedRelease(ctx context.Context, sourcePath s
 	}
 	if err := decodePreparedJSON(assessmentsJSON, &release.Assessments); err != nil {
 		return api.PreparedRelease{}, fmt.Errorf("db load prepared release: decode assessments: %w", err)
+	}
+	if fullEvidenceJSON.Valid {
+		if err := decodePreparedJSON(fullEvidenceJSON.String, &release.FullEvidence); err != nil {
+			return api.PreparedRelease{}, fmt.Errorf("db load prepared release: decode full evidence: %w", err)
+		}
 	}
 	parsedPreparedAt, err := time.Parse(time.RFC3339Nano, preparedAt)
 	if err != nil {

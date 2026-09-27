@@ -5,13 +5,16 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/autobrr/upbrr/internal/config"
+	"github.com/autobrr/upbrr/internal/preparedrelease"
 	"github.com/autobrr/upbrr/internal/releaseworkflow"
 	"github.com/autobrr/upbrr/internal/services/db"
 	"github.com/autobrr/upbrr/pkg/api"
@@ -141,11 +144,23 @@ func preparedIdleInputForTest(t *testing.T) (*Core, *db.SQLiteRepository, string
 			}
 			return api.PrepareResult{Release: api.PreparedRelease{Generation: 1, Source: api.SourceManifest{SourcePath: input.SourcePath}}}, nil
 		}},
-		releaseworkflow.WithActiveInputs(repo, func(_ context.Context, input api.PrepareInput) (api.InputRecord, error) {
+		releaseworkflow.WithActiveInputs(repo, func(ctx context.Context, input api.PrepareInput) (api.InputRecord, error) {
+			verified, err := preparedrelease.VerifyInputSource(ctx, input)
+			if err != nil {
+				return api.InputRecord{}, fmt.Errorf("verify fixture input: %w", err)
+			}
+			version, err := preparedrelease.ActiveInputSourceVersion(verified)
+			if err != nil {
+				return api.InputRecord{}, fmt.Errorf("version fixture input: %w", err)
+			}
+			manifest, err := json.Marshal(verified)
+			if err != nil {
+				return api.InputRecord{}, fmt.Errorf("marshal fixture input: %w", err)
+			}
 			return api.InputRecord{
 				CanonicalPath: input.SourcePath,
-				SourceVersion: "sample",
-				Manifest:      []byte(`{"identity":{"digest":"sample"}}`),
+				SourceVersion: version,
+				Manifest:      manifest,
 			}, nil
 		}),
 	)
@@ -161,6 +176,9 @@ func preparedIdleInputForTest(t *testing.T) (*Core, *db.SQLiteRepository, string
 		logger:   api.NopLogger{},
 	}
 	source := filepath.Join(root, "Example.Release.mkv")
+	if err := os.WriteFile(source, []byte("synthetic media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	opened, err := core.OpenActiveInput(t.Context(), "input-owner", api.OpenActiveInputRequest{
 		Request: api.ContinueReleaseWorkflowRequest{
 			IdempotencyKey: "prepare-idle-input",

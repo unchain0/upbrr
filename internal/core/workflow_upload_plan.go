@@ -68,6 +68,7 @@ type workflowUploadPlanBuilder struct {
 
 type workflowUploadExecution struct {
 	sourceManifest      *api.SourceManifest
+	fullEvidence        []api.FullSourceFile
 	plan                workflowRetainedUploadPlan
 	clients             api.ClientService
 	clientSubject       api.ClientSubject
@@ -303,7 +304,7 @@ func (b workflowUploadPlanBuilder) Build(
 	torrentSubject.TorrentOverrides = descriptionInstructions.Torrent
 	var sourceManifest *api.SourceManifest
 	if _, active := api.ActiveInputAuthorityFromContext(ctx); active {
-		if err := preparedrelease.VerifySourceManifestStability(ctx, subject.SourceManifest); err != nil {
+		if err := preparedrelease.VerifyFullSourceEvidence(ctx, subject.SourceManifest, subject.FullEvidence); err != nil {
 			return api.UploadPlan{}, nil, fmt.Errorf("workflow upload plan: source stability: %w", err)
 		}
 		sourceManifest = &subject.SourceManifest
@@ -342,7 +343,7 @@ func (b workflowUploadPlanBuilder) Build(
 		subject.RehashedTrackers = append([]string(nil), torrent.RehashedTrackers...)
 	}
 	if sourceManifest != nil {
-		if err := preparedrelease.VerifySourceManifestStability(ctx, *sourceManifest); err != nil {
+		if err := preparedrelease.VerifyFullSourceEvidence(ctx, *sourceManifest, subject.FullEvidence); err != nil {
 			return api.UploadPlan{}, nil, fmt.Errorf("workflow upload plan: source changed during torrent preparation: %w", err)
 		}
 	}
@@ -523,6 +524,7 @@ func (b workflowUploadPlanBuilder) Build(
 	}
 	return plan, &workflowUploadExecution{
 		sourceManifest:   sourceManifest,
+		fullEvidence:     append([]api.FullSourceFile(nil), subject.FullEvidence...),
 		plan:             retained,
 		clients:          b.clients,
 		clientSubject:    clientSubject,
@@ -1063,7 +1065,14 @@ func (e *workflowUploadExecution) Execute(
 		if !ok {
 			return nil, errors.New("workflow submission fence reporter is required")
 		}
-		ctx = api.WithWorkflowExternalEffectReporter(ctx, workflowSourceEffectReporter{reporter: reporter, manifest: *e.sourceManifest})
+		ctx = api.WithWorkflowExternalEffectReporter(
+			ctx,
+			workflowSourceEffectReporter{
+				reporter:     reporter,
+				manifest:     *e.sourceManifest,
+				fullEvidence: e.fullEvidence,
+			},
+		)
 	}
 	var (
 		results []trackers.RetainedTrackerResult

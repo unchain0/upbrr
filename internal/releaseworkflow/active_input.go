@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/autobrr/upbrr/internal/pathing"
+	"github.com/autobrr/upbrr/internal/preparedrelease"
 	"github.com/autobrr/upbrr/pkg/api"
 )
 
@@ -741,7 +742,8 @@ func (m *Module) attachVerifiedInput(ctx context.Context, owner string, workflow
 	if err := json.Unmarshal(record.Manifest, &verified); err != nil {
 		return fmt.Errorf("release workflow decode input verification: %w", err)
 	}
-	if verified.Identity.Digest != slot.SourceVersion {
+	version, err := preparedrelease.ActiveInputSourceVersion(verified)
+	if err != nil || version != slot.SourceVersion {
 		return api.ErrActiveInputChanged
 	}
 	input.VerifiedSource = &verified

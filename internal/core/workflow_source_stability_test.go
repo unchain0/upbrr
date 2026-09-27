@@ -38,6 +38,7 @@ func TestUploadPlanRejectsSourceMutationDuringTorrentCreation(t *testing.T) {
 			SourcePath:     source,
 			SourceIdentity: verified.Identity,
 			SourceManifest: verified.Manifest,
+			FullEvidence:   verified.FullEvidence,
 		}},
 		trackers: retained,
 		torrents: torrents,
@@ -95,7 +96,11 @@ func TestRetainedUploadRejectsSourceMutationBeforeFinalFence(t *testing.T) {
 		t.Run(map[bool]string{false: "stable", true: "same-size mutation"}[changed], func(t *testing.T) {
 			source, verified := sourceStabilityFixture(t)
 			plan := &sourceStabilityUploadPlan{}
-			execution := &workflowUploadExecution{sourceManifest: &verified.Manifest, plan: plan}
+			execution := &workflowUploadExecution{
+				sourceManifest: &verified.Manifest,
+				fullEvidence:   verified.FullEvidence,
+				plan:           plan,
+			}
 			if changed {
 				mutateVerifiedSource(t, source)
 			}
@@ -110,6 +115,42 @@ func TestRetainedUploadRejectsSourceMutationBeforeFinalFence(t *testing.T) {
 				t.Fatalf("stable source rejected: err=%v begins=%d submits=%d", err, reporter.begins, plan.submits)
 			}
 		})
+	}
+}
+
+func TestRetainedUploadRejectsSameStatTailMutationBeforeFinalFence(t *testing.T) {
+	source, verified := sourceStabilityFixture(t)
+	before, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutateVerifiedSource(t, source)
+	if err := os.Chtimes(source, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	plan := &sourceStabilityUploadPlan{}
+	execution := &workflowUploadExecution{
+		sourceManifest: &verified.Manifest,
+		fullEvidence:   verified.FullEvidence,
+		plan:           plan,
+	}
+	reporter := &sourceStabilityReporter{}
+	ctx := api.WithWorkflowExternalEffectReporter(t.Context(), reporter)
+	_, err = execution.Execute(ctx, nil)
+	if !errors.Is(err, preparedrelease.ErrSourceChanged) || reporter.begins != 0 || plan.submits != 0 {
+		t.Fatalf("same-stat mutation reached submission: err=%v begins=%d submits=%d", err, reporter.begins, plan.submits)
+	}
+}
+
+func TestRetainedUploadRejectsMissingFullSourceEvidence(t *testing.T) {
+	_, verified := sourceStabilityFixture(t)
+	plan := &sourceStabilityUploadPlan{}
+	execution := &workflowUploadExecution{sourceManifest: &verified.Manifest, plan: plan}
+	reporter := &sourceStabilityReporter{}
+	ctx := api.WithWorkflowExternalEffectReporter(t.Context(), reporter)
+	_, err := execution.Execute(ctx, nil)
+	if !errors.Is(err, preparedrelease.ErrSourceChanged) || reporter.begins != 0 || plan.submits != 0 {
+		t.Fatalf("missing full evidence reached submission: err=%v begins=%d submits=%d", err, reporter.begins, plan.submits)
 	}
 }
 

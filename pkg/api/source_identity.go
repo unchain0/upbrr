@@ -59,8 +59,16 @@ type SourceContentIdentity struct {
 // VerifiedInputSource binds a canonical source manifest to its bounded source
 // samples. It is an internal preparation handoff, never a browser transport shape.
 type VerifiedInputSource struct {
-	Manifest SourceManifest        `json:"manifest"`
-	Identity SourceContentIdentity `json:"identity"`
+	Manifest     SourceManifest        `json:"manifest"`
+	Identity     SourceContentIdentity `json:"identity"`
+	FullEvidence []FullSourceFile      `json:"fullEvidence,omitempty"`
+}
+
+// FullSourceFile is private full-byte evidence, separate from sample-v2 identities.
+type FullSourceFile struct {
+	LocalPath string `json:"localPath"`
+	Size      int64  `json:"size"`
+	SHA256    string `json:"sha256"`
 }
 
 // SubmissionContentFile is one path-free entry in a submitted-inventory

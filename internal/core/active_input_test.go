@@ -5,6 +5,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -57,6 +58,48 @@ func TestVerifyWorkflowInputReportsBoundedSanitizedSourceProgress(t *testing.T) 
 	}
 	if progress.CompletedBytes != api.SourceContentIdentitySampleBytes || progress.TotalBytes != api.SourceContentIdentitySampleBytes {
 		t.Fatalf("source verification byte progress = %#v", progress)
+	}
+}
+
+func TestVerifyWorkflowInputVersionChangesForSameStatAndSampleTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "release.mkv")
+	content := make([]byte, api.SourceContentIdentitySampleBytes+16)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := verifyWorkflowInput(t.Context(), api.PrepareInput{SourcePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, err := verifyWorkflowInput(t.Context(), api.PrepareInput{SourcePath: path})
+	if err != nil || first.SourceVersion != stable.SourceVersion {
+		t.Fatalf("stable verification: %v, versions %q / %q", err, first.SourceVersion, stable.SourceVersion)
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content[len(content)-1] = 1
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, stat.ModTime(), stat.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := verifyWorkflowInput(t.Context(), api.PrepareInput{SourcePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after api.VerifiedInputSource
+	if err := json.Unmarshal(first.Manifest, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Manifest, &after); err != nil {
+		t.Fatal(err)
+	}
+	if before.Identity.Digest != after.Identity.Digest || first.SourceVersion == second.SourceVersion ||
+		before.FullEvidence[0].SHA256 == after.FullEvidence[0].SHA256 {
+		t.Fatalf("tail mutation: sample %q/%q, version %q/%q", before.Identity.Digest, after.Identity.Digest, first.SourceVersion, second.SourceVersion)
 	}
 }
 

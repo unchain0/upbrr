@@ -32,6 +32,7 @@ type PreparedRelease struct {
 	Compatibility    PreparationCompatibility
 	Source           SourceManifest
 	SourceIdentity   SourceContentIdentity `json:"-"`
+	FullEvidence     []FullSourceFile      `json:"-"`
 	Naming           NamingFacts
 	Episode          EpisodeFacts
 	Media            MediaFacts
@@ -794,6 +795,7 @@ func (r PreparedRelease) Clone() (PreparedRelease, error) {
 		ManifestFingerprint: r.SourceIdentity.ManifestFingerprint,
 		Files:               append([]VerifiedSourceFile(nil), r.SourceIdentity.Files...),
 	}
+	cloned.FullEvidence = append([]FullSourceFile(nil), r.FullEvidence...)
 	return cloned, nil
 }
 
