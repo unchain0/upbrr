@@ -39,6 +39,9 @@ var unit3DWidthImageTag = regexp.MustCompile(`(?i)\[img\s+width=(\d+)\]`)
 var unit3DUASignatureTag = regexp.MustCompile(
 	`(?is)\[(?:right|align=right)\]\s*\[url=https://github\.com/(?:Audionut|autobrr)/upbrr\].*?\[/url\]\s*\[/(?:right|align)\]`,
 )
+var unit3DLegacyUADescriptionArtifact = regexp.MustCompile(
+	`(?is)^\s*\[h2\]Screenshots\[/h2\]\s*\[h2\]Audio Spectrogram\[/h2\]\s*\[right\]\[url=https://github\.com/wastaken7/Upload-Assistant\]\[size=4\]Shared with Upload-Assistant v3\.6 \(fork\)\[/size\]\[/url\]\[/right\]\s*$`,
+)
 
 var unit3DNFOBlockTag = regexp.MustCompile(
 	`(?is)\[(?:center|align=center)\]\s*\[spoiler=(?:Scene|FraMeSToR) NFO:\]\[code\].*?\[/code\]\[/spoiler\]\s*\[/(?:center|align)\]`,
@@ -60,9 +63,17 @@ func BuildDescription(
 	menuImages []api.ScreenshotImage,
 	screenshots []api.ScreenshotImage,
 ) (string, error) {
-	if len(screenshots) > 0 {
+	replacementScreenshots := buildDiscScreenshotSections(
+		meta,
+		screenshots,
+		appConfig.Description.ThumbnailSize,
+		parseScreensPerRow(appConfig.Description.ScreensPerRow),
+	) != ""
+	if replacementScreenshots {
 		meta.DescriptionTemplate = StripScreenshotBlocks(meta.DescriptionTemplate)
 		keptDescription = StripScreenshotBlocks(keptDescription)
+		meta.DescriptionTemplate = unit3DLegacyUADescriptionArtifact.ReplaceAllString(meta.DescriptionTemplate, "")
+		keptDescription = unit3DLegacyUADescriptionArtifact.ReplaceAllString(keptDescription, "")
 	}
 	meta.DescriptionTemplate = stripUnit3DSignature(stripUnit3DNFOBlocks(meta.DescriptionTemplate))
 	keptDescription = stripUnit3DSignature(stripUnit3DNFOBlocks(keptDescription))

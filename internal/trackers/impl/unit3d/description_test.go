@@ -439,6 +439,127 @@ func TestBuildUnit3DDescriptionStripsKnownBotSignatures(t *testing.T) {
 	}
 }
 
+func TestBuildUnit3DDescriptionReplacesOrphanScreenshotHeadingAndLegacyCredit(t *testing.T) {
+	kept := "[h2]Screenshots[/h2]\n\n[h2]Audio Spectrogram[/h2]\n\n[right][url=https://github.com/wastaken7/Upload-Assistant][size=4]Shared with Upload-Assistant v3.6 (fork)[/size][/url][/right]"
+	screens := []api.ScreenshotImage{
+		{RawURL: "https://example.com/1.png", WebURL: "https://example.com/1"},
+		{RawURL: "https://example.com/2.png", WebURL: "https://example.com/2"},
+	}
+	meta := api.UploadSubject{ProviderMetadata: api.SourceScopedMetadata{
+		TMDB: &api.TMDBMetadata{Logo: "https://example.com/logo.png"},
+	}}
+	result, err := buildUnit3DDescription(context.Background(), "MNS", meta, config.Config{
+		Description: config.DescriptionSettingsConfig{ScreenshotHeader: "[h2]Screenshots[/h2]", AddLogo: true},
+	}, config.TrackerConfig{}, api.NopLogger{}, kept, nil, screens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(result, "[h2]Screenshots[/h2]") != 1 ||
+		strings.Contains(result, "Shared with Upload-Assistant") ||
+		strings.Count(result, "[img=350]") != 2 ||
+		strings.Count(result, "Uploaded by upbrr") != 1 ||
+		strings.Index(result, "logo.png") >= strings.Index(result, "[h2]Screenshots[/h2]") ||
+		strings.Index(result, "[h2]Screenshots[/h2]") >= strings.Index(result, "[img=350]") ||
+		strings.Index(result, "[img=350]") >= strings.Index(result, "Uploaded by upbrr") {
+		t.Fatalf("orphan header/legacy signature not cleaned: %q", result)
+	}
+}
+
+func TestBuildUnit3DDescriptionKeepsLegacyArtifactWithoutRenderableReplacement(t *testing.T) {
+	legacy := "[h2]Screenshots[/h2]\n\n[h2]Audio Spectrogram[/h2]\n\n[right][url=https://github.com/wastaken7/Upload-Assistant][size=4]Shared with Upload-Assistant v3.6 (fork)[/size][/url][/right]"
+	for _, test := range []struct {
+		name        string
+		screenshots []api.ScreenshotImage
+	}{
+		{name: "none"},
+		{name: "blank", screenshots: []api.ScreenshotImage{{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := buildUnit3DDescription(context.Background(), "MNS", api.UploadSubject{}, config.Config{
+				Description: config.DescriptionSettingsConfig{ScreenshotHeader: "[h2]Screenshots[/h2]"},
+			}, config.TrackerConfig{}, api.NopLogger{}, legacy, nil, test.screenshots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result, "Shared with Upload-Assistant v3.6 (fork)") ||
+				strings.Count(result, "[h2]Screenshots[/h2]") != 1 {
+				t.Fatalf("legacy description changed without a renderable replacement: %q", result)
+			}
+		})
+	}
+}
+
+func TestBuildUnit3DDescriptionKeepsScreenshotHeadingWithBodyText(t *testing.T) {
+	kept := "[h2]Screenshots[/h2]\n\nRelease notes that must remain."
+	result, err := buildUnit3DDescription(context.Background(), "MNS", api.UploadSubject{}, config.Config{
+		Description: config.DescriptionSettingsConfig{ScreenshotHeader: "[h2]Screenshots[/h2]"},
+	}, config.TrackerConfig{}, api.NopLogger{}, kept, nil, []api.ScreenshotImage{{
+		RawURL: "https://example.com/1.png", WebURL: "https://example.com/1",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "Release notes that must remain.") ||
+		strings.Count(result, "[h2]Screenshots[/h2]") != 2 {
+		t.Fatalf("legitimate screenshot heading/body was removed: %q", result)
+	}
+}
+
+func TestBuildUnit3DDescriptionLegacyArtifactBoundaries(t *testing.T) {
+	const artifact = "[h2]Screenshots[/h2]\n\n[h2]Audio Spectrogram[/h2]\n\n[right][url=https://github.com/wastaken7/Upload-Assistant][size=4]Shared with Upload-Assistant v3.6 (fork)[/size][/url][/right]"
+	replacement := []api.ScreenshotImage{{RawURL: "https://example.com/1.png", WebURL: "https://example.com/1"}}
+	for _, test := range []struct {
+		name        string
+		template    string
+		kept        string
+		screenshots []api.ScreenshotImage
+		wantLegacy  bool
+	}{
+		{
+name: "kept with surrounding text",
+ kept: "Before\n\n" + artifact + "\n\nAfter",
+ screenshots: replacement,
+ wantLegacy: true,
+},
+		{
+name: "template with surrounding text",
+ template: "Before\n\n" + artifact + "\n\nAfter",
+ screenshots: replacement,
+ wantLegacy: true,
+},
+		{
+name: "exact template replacement",
+ template: artifact,
+ screenshots: replacement,
+},
+		{
+name: "blank template replacement",
+ template: artifact,
+ screenshots: []api.ScreenshotImage{{}},
+ wantLegacy: true,
+},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := buildUnit3DDescription(context.Background(), "MNS", api.UploadSubject{
+				DescriptionTemplate: test.template,
+			}, config.Config{
+				Description: config.DescriptionSettingsConfig{ScreenshotHeader: "[h2]Screenshots[/h2]"},
+			}, config.TrackerConfig{}, api.NopLogger{}, test.kept, nil, test.screenshots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotLegacy := strings.Contains(result, "Shared with Upload-Assistant v3.6 (fork)")
+			if gotLegacy != test.wantLegacy {
+				t.Fatalf("legacy artifact presence = %v, want %v: %q", gotLegacy, test.wantLegacy, result)
+			}
+			if test.wantLegacy && (!strings.Contains(result, "Before") || !strings.Contains(result, "After")) &&
+				strings.Contains(test.template+test.kept, "Before") {
+				t.Fatalf("surrounding description text was removed: %q", result)
+			}
+		})
+	}
+}
+
 func TestBuildUnit3DDescriptionKeepsCenteredScreenshotsBeforeAitherFooter(t *testing.T) {
 	kept := strings.Join([]string{
 		"Body",
