@@ -216,7 +216,7 @@ func TestSearchTorrentsCBRIncludesPendingAndFiltersTMDB(t *testing.T) {
 		case "/api/torrents/filter":
 			_, _ = w.Write([]byte(`{"data":[{"id":101,"attributes":{"name":"Existing.Release","size":123,"files":[{"name":"existing.mkv"}],"details_link":"https://example.test/torrents/101","download_link":"https://example.test/download/101","type":"WEBDL","resolution":"1080p","internal":true}}],"links":{"next":null}}`))
 		case "/api/torrents/pending":
-			_, _ = w.Write([]byte(`{"data":[{"id":202,"tmdb_id":42,"name":"Pending.Release","size":456,"files":[{"name":"pending.mkv"}],"download_link":"https://example.test/download/202","type":"REMUX","resolution":"2160p"},{"id":203,"tmdb_id":99,"name":"Wrong.Movie","size":789}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":202,"tmdb_id":42,"name":"Pending.Release","size":456,"files":[{"name":"pending.mkv"}],"download_link":"https://example.test/download/202","type":"REMUX","resolution":"2160p"},{"id":203,"tmdb_id":99,"name":"Wrong.Movie","size":789},{"id":204,"name":"Unknown.Work","size":321}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -244,7 +244,7 @@ func TestSearchTorrentsCBRIncludesPendingAndFiltersTMDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search torrents: %v", err)
 	}
-	if !strings.Contains(warning, "omitted 1 row with conflicting TMDB IDs") {
+	if !strings.Contains(warning, "omitted 2 rows with conflicting or missing TMDB IDs") {
 		t.Fatalf("wrong-work warning = %q", warning)
 	}
 	if len(entries) != 2 {

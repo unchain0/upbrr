@@ -470,7 +470,7 @@ func (c *Client) SearchTorrentsWithEvidenceBound(
 		}
 		result.Warning = appendUnit3DWarning(
 			result.Warning,
-			fmt.Sprintf("Unit3D search omitted %d %s with conflicting TMDB IDs", result.WrongWorkCount, rowLabel),
+			fmt.Sprintf("Unit3D search omitted %d %s with conflicting or missing TMDB IDs", result.WrongWorkCount, rowLabel),
 		)
 	}
 
@@ -811,7 +811,7 @@ func buildUnit3DPendingEntries(items []unit3dPendingSearchItem, endpoint unit3dS
 	entries := make([]api.DupeEntry, 0, len(items))
 	wrongWorkCount := 0
 	for _, item := range items {
-		if endpoint.filterTMDBID > 0 && item.TMDBID > 0 && item.TMDBID != endpoint.filterTMDBID {
+		if endpoint.filterTMDBID > 0 && item.TMDBID != endpoint.filterTMDBID {
 			wrongWorkCount++
 			continue
 		}
