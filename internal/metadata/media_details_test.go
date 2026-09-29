@@ -123,6 +123,38 @@ func TestDeriveMediaFactsReturnsMediaInfoScanFailure(t *testing.T) {
 	}
 }
 
+func TestDeriveMediaFactsPreservesExplicitBrazilianSubtitleForTrackerValidation(t *testing.T) {
+	for _, test := range []struct {
+		language string
+		want     []string
+	}{
+		{language: "pt-BR", want: []string{"pt-BR"}},
+		{language: "pt", want: []string{"Portuguese"}},
+		{language: "pt-BR, pt", want: []string{"pt-BR", "Portuguese"}},
+		{language: "pt-PT, PT_br", want: []string{"Portuguese", "pt-BR"}},
+		{language: "por, pt_BR, Portuguese, PT-BR", want: []string{"Portuguese", "pt-BR"}},
+	} {
+		t.Run(test.language, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "mediainfo.json")
+			payload := fmt.Sprintf(`{"media":{"track":[{"@type":"Text","Language":%q}]}}`, test.language)
+			if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			meta, err := NewService(&fakeRepo{}, WithConfig(config.Config{})).deriveMediaFacts(t.Context(), preparationstate.State{
+				SourcePath:        "Example.Movie.2026.mkv",
+				MediaInfoJSONPath: path,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			subject := api.NewTrackerValidationSubject(api.UploadSubject{SubtitleLanguages: meta.SubtitleLanguages}, "SAM")
+			if !slices.Equal(subject.SubtitleLanguages, test.want) {
+				t.Fatalf("tracker subtitle languages = %#v, want %#v", subject.SubtitleLanguages, test.want)
+			}
+		})
+	}
+}
+
 func TestDeriveMediaFactsProjectsHardcodedSubtitleLanguagesOnlyWhenEnabled(t *testing.T) {
 	t.Parallel()
 

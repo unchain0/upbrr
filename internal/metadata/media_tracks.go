@@ -49,7 +49,11 @@ func mediaTrackFacts(meta preparationstate.State, doc mediaInfoDoc) ([]api.Media
 			trackKey = manifest + ":" + strconv.Itoa(ordinal)
 		}
 		title := trackString(track, "Title", "Title_String", "Title_String2", "Title_String3")
-		detected := languageutil.NormalizeLanguageList([]string{trackString(track, "Language", "Language_String", "Language_String2", "Language_String3")})
+		languageValue := trackString(track, "Language", "Language_String", "Language_String2", "Language_String3")
+		detected := languageutil.NormalizeLanguageList([]string{languageValue})
+		if kind == api.MediaTrackSubtitle {
+			detected = normalizeSubtitleLanguages([]string{languageValue})
+		}
 		facts := api.MediaTrackFacts{
 			ID:                  opaqueMediaTrackID(resourceID, kind, trackKey),
 			Kind:                kind,
@@ -179,7 +183,34 @@ func aggregateTrackLanguages(tracks []api.MediaTrackFacts, kind api.MediaTrackKi
 		}
 		values = append(values, track.Languages...)
 	}
+	if kind == api.MediaTrackSubtitle {
+		return normalizeSubtitleLanguages(values)
+	}
 	return languageutil.NormalizeLanguageList(values)
+}
+
+func normalizeSubtitleLanguages(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		for part := range strings.SplitSeq(value, ",") {
+			part = strings.TrimSpace(part)
+			if strings.EqualFold(strings.ReplaceAll(part, "_", "-"), "pt-BR") {
+				part = "pt-BR"
+			} else if normalized := languageutil.NormalizeLanguageList([]string{part}); len(normalized) > 0 {
+				part = normalized[0]
+			} else {
+				continue
+			}
+			key := strings.ToLower(part)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func factProvenanceForList(values []string) api.FactProvenance {
