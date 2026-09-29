@@ -5,10 +5,14 @@ package mediainfo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	preparationstate "github.com/autobrr/upbrr/internal/preparedrelease/state"
@@ -29,10 +33,11 @@ type Exporter interface {
 // Request names host filesystem paths for one source and its release-scoped
 // temporary root. VideoPath overrides SourcePath for non-DVD analysis.
 type Request struct {
-	SourcePath string
-	DiscType   string
-	VideoPath  string
-	TempRoot   string
+	SourcePath   string
+	DiscType     string
+	VideoPath    string
+	TempRoot     string
+	FullEvidence []api.FullSourceFile
 	// ArtifactDir optionally selects a namespaced directory within TempRoot.
 	ArtifactDir string
 	Release     api.ReleaseInfo
@@ -83,13 +88,17 @@ func NewService(logger api.Logger, analyzer Analyzer) *Service {
 	return &Service{logger: logger, analyzer: analyzer}
 }
 
-// Export writes mode-0600 text and JSON reports beneath the release temporary
-// directory. Text reports reduce the analyzed target path to its basename;
-// JSON reports retain the analyzer output. Existing artifacts are reused only
-// when both files exist and the JSON has no conformance error. Reuse cleans
-// cached text and reapplies mode 0600 without rewriting JSON. DVD VOB evidence
-// is analyzed on every call. Errors return no Result, although a failed JSON
-// write may leave the text file.
+// Export writes mode-0600 text and JSON reports beneath a source-path and
+// full-evidence namespace in the release temporary directory. Exports without
+// valid evidence use a unique directory and are never reused. Text reports
+// reduce the analyzed target path to its basename; JSON reports retain the
+// analyzer output. Existing artifacts are reused only when both files exist,
+// the JSON has no conformance error, and private full-byte evidence binds them
+// to the current analysis target. Report files are atomically replaced before
+// the evidence sidecar publishes the set. Reuse cleans cached text and
+// reapplies mode 0600 without rewriting JSON. DVD VOB evidence is analyzed on
+// every call. Errors return no Result, although a failed JSON write may leave
+// unpublished text.
 func (s *Service) Export(ctx context.Context, req Request) (Result, error) {
 	select {
 	case <-ctx.Done():
@@ -104,6 +113,7 @@ func (s *Service) Export(ctx context.Context, req Request) (Result, error) {
 	if strings.TrimSpace(target.AnalyzePath) == "" {
 		return Result{}, errors.New("mediainfo: empty target")
 	}
+	evidence, evidenceOK := sourceEvidenceForTarget(req.FullEvidence, target.AnalyzePath)
 
 	tmpDir := strings.TrimSpace(req.ArtifactDir)
 	if tmpDir == "" {
@@ -120,12 +130,24 @@ func (s *Service) Export(ctx context.Context, req Request) (Result, error) {
 			return Result{}, fmt.Errorf("mediainfo: create artifact directory: %w", err)
 		}
 	}
+	if evidenceOK {
+		tmpDir = filepath.Join(tmpDir, "mediainfo-"+sourceNamespace(target.AnalyzePath, evidence.SHA256))
+		if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+			return Result{}, fmt.Errorf("mediainfo: create source artifact directory: %w", err)
+		}
+	} else {
+		tmpDir, err = os.MkdirTemp(tmpDir, "mediainfo-unverified-")
+		if err != nil {
+			return Result{}, fmt.Errorf("mediainfo: create unverified artifact directory: %w", err)
+		}
+	}
 	textPath := filepath.Join(tmpDir, "mediainfo.txt")
 	jsonPath := filepath.Join(tmpDir, "MediaInfo.json")
+	evidencePath := filepath.Join(tmpDir, "MediaInfo.source.json")
 	if s.logger != nil {
 		s.logger.Debugf("mediainfo: checking cache at %s (text=%v json=%v)", tmpDir, fileExists(textPath), fileExists(jsonPath))
 	}
-	if fileExists(textPath) && fileExists(jsonPath) {
+	if fileExists(textPath) && fileExists(jsonPath) && evidenceOK && sourceEvidenceMatches(evidencePath, evidence) {
 		hasErrors, err := conformanceError(jsonPath, req.DiscType)
 		if err == nil && !hasErrors {
 			textOutput, err := os.ReadFile(textPath)
@@ -166,6 +188,9 @@ func (s *Service) Export(ctx context.Context, req Request) (Result, error) {
 			}
 		}
 	}
+	if err := os.Remove(evidencePath); err != nil && !os.IsNotExist(err) {
+		return Result{}, fmt.Errorf("mediainfo: remove stale source evidence: %w", err)
+	}
 
 	if s.logger != nil {
 		s.logger.Debugf("mediainfo: analyzing %s", target.AnalyzePath)
@@ -178,11 +203,20 @@ func (s *Service) Export(ctx context.Context, req Request) (Result, error) {
 
 	cleanText := cleanMediaInfoText(textOutput, target.AnalyzePath)
 
-	if err := os.WriteFile(textPath, []byte(cleanText), 0o600); err != nil {
+	if err := writeMediaInfoText(textPath, []byte(cleanText)); err != nil {
 		return Result{}, fmt.Errorf("mediainfo: write text: %w", err)
 	}
-	if err := os.WriteFile(jsonPath, jsonOutput, 0o600); err != nil {
+	if err := writeMediaInfoText(jsonPath, jsonOutput); err != nil {
 		return Result{}, fmt.Errorf("mediainfo: write json: %w", err)
+	}
+	if evidenceOK {
+		payload, err := json.Marshal(evidence)
+		if err != nil {
+			return Result{}, fmt.Errorf("mediainfo: encode source evidence: %w", err)
+		}
+		if err := writeMediaInfoText(evidencePath, payload); err != nil {
+			return Result{}, fmt.Errorf("mediainfo: write source evidence: %w", err)
+		}
 	}
 
 	if s.logger != nil {
@@ -203,6 +237,42 @@ func (s *Service) Export(ctx context.Context, req Request) (Result, error) {
 		VOBText:  vobText,
 		VOBJSON:  vobJSON,
 	}, nil
+}
+
+func sourceNamespace(target, verifiedDigest string) string {
+	cleaned := filepath.Clean(target)
+	if absolute, err := filepath.Abs(cleaned); err == nil {
+		cleaned = absolute
+	}
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	sum := sha256.Sum256([]byte(cleaned + "\x00" + verifiedDigest))
+	return hex.EncodeToString(sum[:])
+}
+
+func sourceEvidenceForTarget(full []api.FullSourceFile, target string) (api.FullSourceFile, bool) {
+	for _, evidence := range full {
+		if !pathutil.SamePath(evidence.LocalPath, target) || evidence.Size < 0 || len(evidence.SHA256) != sha256.Size*2 {
+			continue
+		}
+		if _, err := hex.DecodeString(evidence.SHA256); err == nil {
+			evidence.SHA256 = strings.ToLower(evidence.SHA256)
+			return evidence, true
+		}
+	}
+	return api.FullSourceFile{}, false
+}
+
+func sourceEvidenceMatches(path string, current api.FullSourceFile) bool {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var cached api.FullSourceFile
+	return json.Unmarshal(payload, &cached) == nil &&
+		pathutil.SamePath(cached.LocalPath, current.LocalPath) &&
+		cached.Size == current.Size && cached.SHA256 == current.SHA256
 }
 
 func analyzeVOB(ctx context.Context, analyzer Analyzer, vobPath string) (string, string, error) {

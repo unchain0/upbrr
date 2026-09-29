@@ -347,6 +347,13 @@ func cloneTrackerIDs(values map[string]string) map[string]string {
 	return cloned
 }
 
+func verifiedFullSourceEvidence(input api.PrepareInput) []api.FullSourceFile {
+	if input.VerifiedSource == nil {
+		return nil
+	}
+	return input.VerifiedSource.FullEvidence
+}
+
 // collectSourceEvidence validates source resources, resolves Blu-ray selection,
 // and gathers filesystem evidence before provider and client enrichment.
 func (s *Service) collectSourceEvidence(ctx context.Context, request preparationstate.Request) (meta preparationstate.State, err error) {
@@ -580,11 +587,12 @@ func (s *Service) collectSourceEvidence(ctx context.Context, request preparation
 			return preparationstate.State{}, fmt.Errorf("metadata: tmp dir: %w", err)
 		}
 		miResult, err := s.mi.Export(ctx, mediainfo.Request{
-			SourcePath: meta.SourcePath,
-			DiscType:   meta.DiscType,
-			VideoPath:  meta.VideoPath,
-			TempRoot:   tmpRoot,
-			Release:    meta.Release,
+			SourcePath:   meta.SourcePath,
+			DiscType:     meta.DiscType,
+			VideoPath:    meta.VideoPath,
+			TempRoot:     tmpRoot,
+			FullEvidence: verifiedFullSourceEvidence(input),
+			Release:      meta.Release,
 		})
 		if err != nil {
 			return preparationstate.State{}, fmt.Errorf("metadata: mediainfo: %w", err)
@@ -783,12 +791,13 @@ func (s *Service) collectDiscEvidence(
 
 		if s.mi != nil {
 			result, err := s.mi.Export(ctx, mediainfo.Request{
-				SourcePath:  disc.Root,
-				DiscType:    disc.Type,
-				VideoPath:   resource.VideoPath,
-				TempRoot:    tmpRoot,
-				ArtifactDir: artifactDir,
-				Release:     meta.Release,
+				SourcePath:   disc.Root,
+				DiscType:     disc.Type,
+				VideoPath:    resource.VideoPath,
+				TempRoot:     tmpRoot,
+				ArtifactDir:  artifactDir,
+				FullEvidence: verifiedFullSourceEvidence(request.Input),
+				Release:      meta.Release,
 			})
 			if err != nil {
 				return fmt.Errorf("metadata: disc MediaInfo: %w", err)

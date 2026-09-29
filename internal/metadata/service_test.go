@@ -463,13 +463,23 @@ func TestCollectTVPackSelectsFirstEpisodeForMediaInfoAndScreenshots(t *testing.T
 			mediaInfo := &recordingMediaInfo{}
 			service := NewService(&stubRepo{}, WithMediaInfoExporter(mediaInfo), WithSceneDetector(stubSceneDetector{}),
 				WithConfig(config.Config{MainSettings: config.MainSettingsConfig{DBPath: filepath.Join(base, "db.sqlite")}}))
-			meta, err := service.collectSourceEvidence(context.Background(), testCollectionRequest(t, api.Request{SourcePath: source}))
+			evidence := api.FullSourceFile{
+				LocalPath: filepath.Join(source, test.files[0]),
+				Size:      5,
+				SHA256:    strings.Repeat("a", 64),
+			}
+			request := testCollectionRequest(t, api.Request{SourcePath: source})
+			request.Input.VerifiedSource = &api.VerifiedInputSource{FullEvidence: []api.FullSourceFile{evidence}}
+			meta, err := service.collectSourceEvidence(context.Background(), request)
 			if err != nil {
 				t.Fatal(err)
 			}
 			want := filepath.Join(source, test.want)
 			if !meta.TVPack || meta.VideoPath != want || mediaInfo.request.VideoPath != want {
 				t.Fatalf("expected pack media/screenshot source %q, got pack=%t video=%q mediainfo=%q", want, meta.TVPack, meta.VideoPath, mediaInfo.request.VideoPath)
+			}
+			if len(mediaInfo.request.FullEvidence) != 1 || mediaInfo.request.FullEvidence[0] != evidence {
+				t.Fatalf("MediaInfo full evidence = %#v, want %#v", mediaInfo.request.FullEvidence, evidence)
 			}
 		})
 	}
